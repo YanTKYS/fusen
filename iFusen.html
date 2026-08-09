@@ -188,6 +188,27 @@
     transform: scale(1.15);
   }
 
+  .note-edit-btn {
+    width: 18px;
+    height: 18px;
+    border: none;
+    background: transparent;
+    color: var(--ink);
+    cursor: pointer;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+  }
+  .note-edit-btn svg {
+    width: 14px;
+    height: 14px;
+  }
+  .note-edit-btn:hover {
+    color: var(--accent);
+  }
+
   .note-delete-btn {
     width: 18px;
     height: 18px;
@@ -569,6 +590,7 @@
     el.style.top = note.y + "px";
     el.style.background = note.color;
     el.style.transform = "rotate(" + note.rot + "deg)";
+    el.title = "クリックして編集 / ドラッグで移動";
 
     const text = document.createElement("div");
     text.className = "note-text";
@@ -578,6 +600,22 @@
 
     const toolbar = document.createElement("div");
     toolbar.className = "note-toolbar";
+
+    const editBtn = document.createElement("button");
+    editBtn.className = "note-edit-btn";
+    editBtn.title = "編集";
+    editBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M17 3.5a2.1 2.1 0 0 1 3 3L8 18.5l-4.5 1 1-4.5Z" /></svg>';
+    editBtn.addEventListener("pointerdown", function (e) {
+      e.stopPropagation();
+    });
+    editBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      enterEditMode(note, text);
+    });
+    toolbar.appendChild(editBtn);
+
     NOTE_COLORS.forEach(function (color) {
       const dot = document.createElement("div");
       dot.className = "note-color-dot";
@@ -719,21 +757,28 @@
       }
     });
 
-    function endDrag(e) {
-      if (!dragging) return;
+    function releaseDrag(e) {
       dragging = false;
       el.classList.remove("dragging");
       try { el.releasePointerCapture(e.pointerId); } catch (err) { /* noop */ }
-      if (moved) scheduleSave();
     }
 
-    el.addEventListener("pointerup", endDrag);
-    el.addEventListener("pointercancel", endDrag);
+    el.addEventListener("pointerup", function (e) {
+      if (!dragging) return;
+      const wasMoved = moved;
+      releaseDrag(e);
+      if (wasMoved) {
+        scheduleSave();
+      } else {
+        // Pointer went down and up again without crossing the drag threshold:
+        // treat it as a click on the note and start editing its text.
+        enterEditMode(note, textEl);
+      }
+    });
 
-    el.addEventListener("dblclick", function (e) {
-      if (currentTool !== "select") return;
-      e.stopPropagation();
-      enterEditMode(note, textEl);
+    el.addEventListener("pointercancel", function (e) {
+      if (!dragging) return;
+      releaseDrag(e);
     });
 
     textEl.addEventListener("blur", function () {
