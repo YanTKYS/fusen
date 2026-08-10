@@ -397,6 +397,24 @@
       </svg>
     </button>
     <span id="zoomLabel">100%</span>
+
+    <div class="toolbar-sep"></div>
+
+    <button class="tool-btn" id="saveFileBtn" title="ファイルに保存 (.ifusen)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3v12" />
+        <path d="M7 10l5 5 5-5" />
+        <path d="M4 19h16" />
+      </svg>
+    </button>
+    <button class="tool-btn" id="loadFileBtn" title="ファイルから復元 (.ifusen)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 15V3" />
+        <path d="M7 8l5-5 5 5" />
+        <path d="M4 19h16" />
+      </svg>
+    </button>
+    <input type="file" id="fileInput" accept=".ifusen,application/json" style="display:none" />
   </div>
 
   <!-- Clear all -->
@@ -424,6 +442,9 @@
    * ========================================================== */
 
   const STORAGE_KEY = "ifusen.whiteboard.v1";
+  const FILE_APP_NAME = "iFusen";
+  const FILE_FORMAT_VERSION = 1;
+  const FILE_EXTENSION = ".ifusen";
   const MIN_ZOOM = 0.15;
   const MAX_ZOOM = 4;
   const DRAG_THRESHOLD = 3; // px, screen space
@@ -477,6 +498,9 @@
   const resetViewBtn = document.getElementById("resetViewBtn");
   const brushCursorEl = document.getElementById("brushCursor");
   const emptyHintEl = document.getElementById("emptyHint");
+  const saveFileBtn = document.getElementById("saveFileBtn");
+  const loadFileBtn = document.getElementById("loadFileBtn");
+  const fileInputEl = document.getElementById("fileInput");
 
   /* ============================================================
    * Utilities
@@ -528,23 +552,129 @@
     }
   }
 
+  /** Copies notes/strokes/camera from a plain object into the live state. */
+  function applyStateData(data) {
+    state.notes = Array.isArray(data.notes) ? data.notes : [];
+    state.strokes = Array.isArray(data.strokes) ? data.strokes : [];
+    if (data.camera) {
+      state.camera.x = data.camera.x || 0;
+      state.camera.y = data.camera.y || 0;
+      state.camera.zoom = clamp(data.camera.zoom || 1, MIN_ZOOM, MAX_ZOOM);
+    }
+  }
+
   function loadState() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return;
       const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object") {
-        state.notes = Array.isArray(parsed.notes) ? parsed.notes : [];
-        state.strokes = Array.isArray(parsed.strokes) ? parsed.strokes : [];
-        if (parsed.camera) {
-          state.camera.x = parsed.camera.x || 0;
-          state.camera.y = parsed.camera.y || 0;
-          state.camera.zoom = clamp(parsed.camera.zoom || 1, MIN_ZOOM, MAX_ZOOM);
-        }
-      }
+      if (parsed && typeof parsed === "object") applyStateData(parsed);
     } catch (err) {
       console.warn("iFusen: failed to load state", err);
     }
+  }
+
+  /* ============================================================
+   * File export / import ( .ifusen )
+   * ========================================================== */
+
+  function twoDigits(n) {
+    return n < 10 ? "0" + n : "" + n;
+  }
+
+  function fileTimestamp(date) {
+    return (
+      date.getFullYear() +
+      twoDigits(date.getMonth() + 1) +
+      twoDigits(date.getDate()) +
+      "_" +
+      twoDigits(date.getHours()) +
+      twoDigits(date.getMinutes())
+    );
+  }
+
+  function exportToFile() {
+    const payload = {
+      app: FILE_APP_NAME,
+      formatVersion: FILE_FORMAT_VERSION,
+      exportedAt: new Date().toISOString(),
+      state: {
+        notes: state.notes,
+        strokes: state.strokes,
+        camera: state.camera,
+      },
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "iFusen_" + fileTimestamp(new Date()) + FILE_EXTENSION;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  /**
+   * Checks only what render/save need to not break: correct wrapper, a
+   * supported format version, and the three state fields with the right
+   * container types. Returns { ok: true, data } or { ok: false, message }.
+   */
+  function validateIfusenPayload(parsed) {
+    if (!parsed || typeof parsed !== "object") {
+      return { ok: false, message: "ファイルの内容を読み取れませんでした。" };
+    }
+    if (parsed.app !== FILE_APP_NAME) {
+      return { ok: false, message: "iFusenのファイルではないようです。" };
+    }
+    if (parsed.formatVersion !== FILE_FORMAT_VERSION) {
+      return { ok: false, message: "対応していない形式バージョンです。" };
+    }
+    const data = parsed.state;
+    if (!data || typeof data !== "object") {
+      return { ok: false, message: "ファイルにホワイトボードのデータが含まれていません。" };
+    }
+    if (!Array.isArray(data.notes) || !Array.isArray(data.strokes) || !data.camera) {
+      return { ok: false, message: "ファイルの内容が壊れているようです。" };
+    }
+    return { ok: true, data: data };
+  }
+
+  function restoreFromFile(file) {
+    const reader = new FileReader();
+    reader.onload = function () {
+      let parsed;
+      try {
+        parsed = JSON.parse(String(reader.result));
+      } catch (err) {
+        window.alert("JSONとして読み取れないファイルです。復元を中止しました。");
+        return;
+      }
+
+      const result = validateIfusenPayload(parsed);
+      if (!result.ok) {
+        window.alert(result.message + " 復元を中止しました。");
+        return;
+      }
+
+      const ok = window.confirm(
+        "現在のホワイトボードを置き換えて、選択したファイルから復元します。よろしいですか？"
+      );
+      if (!ok) return;
+
+      applyStateData(result.data);
+      selectedNoteId = null;
+      renderAllNotes();
+      renderAllStrokes();
+      applyCamera();
+      updateEmptyHint();
+      saveStateNow();
+    };
+    reader.onerror = function () {
+      window.alert("ファイルの読み込みに失敗しました。復元を中止しました。");
+    };
+    reader.readAsText(file);
   }
 
   /* ============================================================
@@ -1140,6 +1270,18 @@
     applyCamera();
     updateEmptyHint();
     saveStateNow();
+  });
+
+  saveFileBtn.addEventListener("click", exportToFile);
+
+  loadFileBtn.addEventListener("click", function () {
+    fileInputEl.click();
+  });
+
+  fileInputEl.addEventListener("change", function () {
+    const file = fileInputEl.files && fileInputEl.files[0];
+    fileInputEl.value = ""; // allow re-selecting the same file next time
+    if (file) restoreFromFile(file);
   });
 
   /* ============================================================
