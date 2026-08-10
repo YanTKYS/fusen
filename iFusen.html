@@ -53,9 +53,9 @@
     cursor: default;
   }
 
-  #viewport.panning {
-    cursor: grabbing;
-  }
+  /* Cursor rules go from the weakest intent to the strongest: the active tool
+     picks a cursor, holding Space offers a grab, and a drag in progress wins
+     over both. Later rules of equal weight override the earlier ones. */
   body.tool-note #viewport {
     cursor: copy;
   }
@@ -71,7 +71,9 @@
   body.space-pan #viewport {
     cursor: grab;
   }
-  body.space-pan #viewport.panning {
+  body.panning #viewport,
+  body.panning .sticky-note,
+  body.panning .note-text {
     cursor: grabbing;
   }
 
@@ -365,7 +367,7 @@
   <!-- Toolbar -->
   <div id="toolbar">
     <button class="tool-btn" data-tool="select" title="選択 (V)">
-      <svg viewBox="0 0 20 20" fill="currentColor"><polygon points="3,2 3,18 7.5,14.3 10,20.3 12.6,19.2 10.1,13.2 16,13.2" /></svg>
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 2.5 19 12l-6.6 1.6L9.2 19.5z" /></svg>
     </button>
     <button class="tool-btn" data-tool="note" title="付箋 (N)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
@@ -452,6 +454,10 @@
   const PEN_WIDTH = 3; // world units
   const ERASER_RADIUS_SCREEN = 16; // px, constant on-screen size
   const MIN_POINT_DISTANCE = 2; // px, screen space: skip points too close to the previous one
+  // Firefox reports wheel steps in lines instead of pixels; one notch is three
+  // lines there and ~100px elsewhere, so a line is treated as ~33px.
+  const PIXELS_PER_WHEEL_LINE = 33;
+  const PIXELS_PER_WHEEL_PAGE = 400;
 
   // must match .sticky-note in the stylesheet
   const NOTE_WIDTH = 190;
@@ -483,6 +489,7 @@
   let currentTool = "select";
   let selectedNoteId = null;
   let lastUsedColor = NOTE_COLORS[0];
+  let pointerInViewport = false;
 
   /* ============================================================
    * DOM references
@@ -522,6 +529,11 @@
     return textEl.innerText;
   }
 
+  /** Releases a captured pointer, ignoring pointers that were never captured. */
+  function releaseCapture(el, pointerId) {
+    if (el.hasPointerCapture(pointerId)) el.releasePointerCapture(pointerId);
+  }
+
   function screenToWorld(clientX, clientY) {
     const rect = viewportEl.getBoundingClientRect();
     const sx = clientX - rect.left;
@@ -537,6 +549,7 @@
    * ========================================================== */
 
   let saveTimer = null;
+  let saveFailureReported = false;
 
   function scheduleSave() {
     clearTimeout(saveTimer);
@@ -549,6 +562,15 @@
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (err) {
       console.warn("iFusen: failed to save state", err);
+      // Autosave silently giving up is how a day of work disappears at the next
+      // reload. Say it once, then stay quiet so typing is not interrupted.
+      if (!saveFailureReported) {
+        saveFailureReported = true;
+        window.alert(
+          "自動保存できませんでした。ブラウザの保存容量が不足している可能性があります。" +
+            "ツールバーの保存ボタンからファイルに書き出してください。"
+        );
+      }
     }
   }
 
@@ -613,7 +635,11 @@
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(url);
+    // Revoking straight away cancels the download in some browsers, which looks
+    // to the user like the save button simply did nothing.
+    setTimeout(function () {
+      URL.revokeObjectURL(url);
+    }, 1000);
   }
 
   /**
@@ -665,10 +691,7 @@
 
       applyStateData(result.data);
       selectedNoteId = null;
-      renderAllNotes();
-      renderAllStrokes();
-      applyCamera();
-      updateEmptyHint();
+      renderAll();
       saveStateNow();
     };
     reader.onerror = function () {
@@ -719,6 +742,14 @@
   function updateEmptyHint() {
     const empty = state.notes.length === 0 && state.strokes.length === 0;
     emptyHintEl.style.display = empty ? "block" : "none";
+  }
+
+  /** Rebuilds the whole board from the current state (load, restore, clear). */
+  function renderAll() {
+    renderAllNotes();
+    renderAllStrokes();
+    applyCamera();
+    updateEmptyHint();
   }
 
   /* ============================================================
@@ -842,6 +873,11 @@
   }
 
   function enterEditMode(textEl) {
+    // Already editing: keep the caret where the user put it.
+    if (textEl.classList.contains("editing")) {
+      textEl.focus();
+      return;
+    }
     textEl.classList.add("editing");
     textEl.contentEditable = "true";
     textEl.focus();
@@ -860,8 +896,14 @@
     let startWorld = { x: 0, y: 0 };
 
     el.addEventListener("pointerdown", function (e) {
+      // Only the primary button drags. A right-click used to start a drag that
+      // no pointerup ever ended, leaving the note glued to the cursor.
+      if (e.button !== 0) return;
       if (currentTool !== "select") return;
-      if (textEl.classList.contains("editing")) return; // let text editing behave normally
+      if (spacePressed) return; // Space always pans, even over a note
+      // Clicking inside the text being edited must place the caret, but the
+      // margin around it still drags the note.
+      if (textEl.classList.contains("editing") && textEl.contains(e.target)) return;
       e.stopPropagation();
 
       bringToFront(note);
@@ -893,7 +935,7 @@
     function releaseDrag(e) {
       dragging = false;
       el.classList.remove("dragging");
-      try { el.releasePointerCapture(e.pointerId); } catch (err) { /* noop */ }
+      releaseCapture(el, e.pointerId);
     }
 
     el.addEventListener("pointerup", function (e) {
@@ -1095,20 +1137,23 @@
 
     if (tool !== "select") setSelectedNote(null);
 
-    brushCursorEl.style.display = tool === "pen" || tool === "eraser" ? "block" : "none";
-    updateBrushCursorSize();
+    updateBrushCursor();
   }
 
-  function updateBrushCursorSize() {
-    let diameter = 0;
-    if (currentTool === "pen") {
-      diameter = PEN_WIDTH * state.camera.zoom;
-    } else if (currentTool === "eraser") {
-      diameter = ERASER_RADIUS_SCREEN * 2;
-    }
-    diameter = Math.max(diameter, 6);
-    brushCursorEl.style.width = diameter + "px";
-    brushCursorEl.style.height = diameter + "px";
+  /**
+   * Shows the pen/eraser circle at the size it will actually cover, and only
+   * while the pointer is over the canvas — otherwise switching tools with the
+   * keyboard left a stray circle in the corner of the screen.
+   */
+  function updateBrushCursor() {
+    const usesBrush = currentTool === "pen" || currentTool === "eraser";
+    brushCursorEl.style.display = usesBrush && pointerInViewport ? "block" : "none";
+    if (!usesBrush) return;
+
+    const diameter =
+      currentTool === "pen" ? PEN_WIDTH * state.camera.zoom : ERASER_RADIUS_SCREEN * 2;
+    brushCursorEl.style.width = Math.max(diameter, 6) + "px";
+    brushCursorEl.style.height = Math.max(diameter, 6) + "px";
   }
 
   /* ============================================================
@@ -1126,44 +1171,43 @@
   }
 
   viewportEl.addEventListener("pointerdown", function (e) {
+    const isMiddleButton = e.button === 1;
+    // Anything but the primary or middle button (right-click, back/forward) is
+    // left to the browser: acting on it started gestures that never finished,
+    // because the context menu swallows the matching pointerup.
+    if (e.button !== 0 && !isMiddleButton) return;
+
     pointerMoved = false;
 
     // Middle-button or space-drag: pan regardless of tool.
-    if (e.button === 1 || (spacePressed && e.button === 0)) {
+    if (isMiddleButton || spacePressed) {
       e.preventDefault(); // middle-click would otherwise start browser autoscroll
       startPan(e);
       return;
     }
 
-    if (currentTool === "select") {
-      if (!isBackgroundTarget(e.target)) return;
-      startPan(e);
+    // Select and note both drag the canvas from an empty spot; a press that
+    // does not move is handled on release (deselect / create note).
+    if (currentTool === "select" || currentTool === "note") {
+      if (isBackgroundTarget(e.target)) startPan(e);
       return;
     }
 
+    isDrawing = true;
+    viewportEl.setPointerCapture(e.pointerId);
+    const worldPoint = screenToWorld(e.clientX, e.clientY);
     if (currentTool === "pen") {
-      if (e.button !== 0) return;
-      isDrawing = true;
-      viewportEl.setPointerCapture(e.pointerId);
-      startStroke(screenToWorld(e.clientX, e.clientY));
-      return;
+      startStroke(worldPoint);
+    } else {
+      eraseNear(worldPoint);
     }
-
-    if (currentTool === "eraser") {
-      if (e.button !== 0) return;
-      isDrawing = true;
-      viewportEl.setPointerCapture(e.pointerId);
-      eraseNear(screenToWorld(e.clientX, e.clientY));
-      return;
-    }
-    // "note" tool: creation happens on click (see click listener below).
   });
 
   function startPan(e) {
     panning = true;
     panStart = { x: e.clientX, y: e.clientY };
     camStart = { x: state.camera.x, y: state.camera.y };
-    viewportEl.classList.add("panning");
+    document.body.classList.add("panning");
     viewportEl.setPointerCapture(e.pointerId);
   }
 
@@ -1198,18 +1242,21 @@
   function finishPointer(e) {
     if (panning) {
       panning = false;
-      viewportEl.classList.remove("panning");
-      try { viewportEl.releasePointerCapture(e.pointerId); } catch (err) { /* noop */ }
-      if (!pointerMoved && currentTool === "select" && isBackgroundTarget(e.target)) {
+      document.body.classList.remove("panning");
+      releaseCapture(viewportEl, e.pointerId);
+      if (pointerMoved) {
+        scheduleSave();
+      } else if (currentTool === "select") {
         setSelectedNote(null);
       }
-      if (pointerMoved) scheduleSave();
       return;
     }
     if (isDrawing) {
       isDrawing = false;
-      try { viewportEl.releasePointerCapture(e.pointerId); } catch (err) { /* noop */ }
-      if (currentTool === "pen") endStroke();
+      releaseCapture(viewportEl, e.pointerId);
+      // Unconditional: switching tools mid-stroke used to skip this and the
+      // line drawn so far was thrown away. endStroke does nothing when idle.
+      endStroke();
     }
   }
 
@@ -1226,22 +1273,29 @@
 
   // Keep the brush preview from lingering when the pointer leaves the canvas.
   viewportEl.addEventListener("pointerleave", function () {
-    brushCursorEl.style.display = "none";
+    pointerInViewport = false;
+    updateBrushCursor();
   });
 
   viewportEl.addEventListener("pointerenter", function () {
-    if (currentTool === "pen" || currentTool === "eraser") {
-      brushCursorEl.style.display = "block";
-    }
+    pointerInViewport = true;
+    updateBrushCursor();
   });
+
+  /** Wheel steps come in pixels, lines or pages depending on the browser. */
+  function wheelDeltaPixels(e) {
+    if (e.deltaMode === 1) return e.deltaY * PIXELS_PER_WHEEL_LINE;
+    if (e.deltaMode === 2) return e.deltaY * PIXELS_PER_WHEEL_PAGE;
+    return e.deltaY;
+  }
 
   viewportEl.addEventListener(
     "wheel",
     function (e) {
       e.preventDefault();
-      const factor = Math.exp(-e.deltaY * 0.0012);
+      const factor = Math.exp(-wheelDeltaPixels(e) * 0.0012);
       zoomAt(e.clientX, e.clientY, factor);
-      updateBrushCursorSize();
+      updateBrushCursor();
     },
     { passive: false }
   );
@@ -1265,10 +1319,7 @@
     state.strokes = [];
     state.camera = { x: 0, y: 0, zoom: 1 };
     selectedNoteId = null;
-    renderAllNotes();
-    renderAllStrokes();
-    applyCamera();
-    updateEmptyHint();
+    renderAll();
     saveStateNow();
   });
 
@@ -1288,7 +1339,16 @@
    * Keyboard shortcuts
    * ========================================================== */
 
+  function setSpacePan(pressed) {
+    spacePressed = pressed;
+    document.body.classList.toggle("space-pan", pressed);
+  }
+
   document.addEventListener("keydown", function (e) {
+    // Keys that belong to an in-progress kana/kanji conversion are the IME's,
+    // not ours: Escape there means "cancel the conversion", not "stop editing".
+    if (e.isComposing) return;
+
     // Leave browser and OS shortcuts alone (Ctrl+V, Ctrl+P, Cmd+N ...):
     // they must not be mistaken for the single-letter tool shortcuts.
     if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1297,8 +1357,7 @@
     const isEditingText = active && active.isContentEditable;
 
     if (e.code === "Space" && !isEditingText) {
-      spacePressed = true;
-      document.body.classList.add("space-pan");
+      setSpacePan(true);
       e.preventDefault();
       return;
     }
@@ -1336,10 +1395,13 @@
   });
 
   document.addEventListener("keyup", function (e) {
-    if (e.code === "Space") {
-      spacePressed = false;
-      document.body.classList.remove("space-pan");
-    }
+    if (e.code === "Space") setSpacePan(false);
+  });
+
+  // Switching windows while Space is held never delivers the keyup, which left
+  // the board stuck in pan mode: every later click dragged instead of drawing.
+  window.addEventListener("blur", function () {
+    setSpacePan(false);
   });
 
   /* ============================================================
@@ -1353,11 +1415,8 @@
 
   function init() {
     loadState();
-    renderAllNotes();
-    renderAllStrokes();
-    applyCamera();
+    renderAll();
     setTool("select");
-    updateEmptyHint();
   }
 
   init();
