@@ -53,17 +53,19 @@
     cursor: default;
   }
 
-  body.tool-select #viewport {
-    cursor: default;
-  }
-  body.tool-select #viewport.panning {
+  #viewport.panning {
     cursor: grabbing;
   }
   body.tool-note #viewport {
     cursor: copy;
   }
+  /* the brush circle replaces the cursor, notes included */
   body.tool-pen #viewport,
-  body.tool-eraser #viewport {
+  body.tool-eraser #viewport,
+  body.tool-pen .sticky-note,
+  body.tool-eraser .sticky-note,
+  body.tool-pen .note-text,
+  body.tool-eraser .note-text {
     cursor: none;
   }
   body.space-pan #viewport {
@@ -90,21 +92,12 @@
     pointer-events: none;
   }
 
+  /* the layer itself is transparent to the pointer; notes opt back in */
   #notesLayer {
     position: absolute;
     left: 0;
     top: 0;
     pointer-events: none;
-  }
-
-  /* while drawing / erasing, notes must not intercept pointer events */
-  body.tool-pen #notesLayer,
-  body.tool-eraser #notesLayer {
-    pointer-events: none;
-  }
-  body.tool-select #notesLayer,
-  body.tool-note #notesLayer {
-    pointer-events: none; /* the layer itself is transparent; children opt in */
   }
 
   /* ---------------------------------------------------------- */
@@ -142,8 +135,6 @@
     line-height: 1.45;
     white-space: pre-wrap;
     word-break: break-word;
-    overflow-y: auto;
-    max-height: 220px;
     cursor: text;
     caret-color: var(--caret);
     border-radius: 4px;
@@ -439,6 +430,13 @@
   const PEN_COLOR = "#2b2b2b";
   const PEN_WIDTH = 3; // world units
   const ERASER_RADIUS_SCREEN = 16; // px, constant on-screen size
+  const MIN_POINT_DISTANCE = 2; // px, screen space: skip points too close to the previous one
+
+  // must match .sticky-note in the stylesheet
+  const NOTE_WIDTH = 190;
+  const NOTE_HEIGHT = 150;
+
+  const TOOLS = ["select", "note", "pen", "eraser"];
 
   const NOTE_COLORS = [
     "#fff59d", // yellow
@@ -492,6 +490,14 @@
     return Math.min(max, Math.max(min, v));
   }
 
+  /**
+   * Reads the text of an editable note. innerText keeps the line breaks the
+   * browser stores as <div>/<br>; textContent would silently drop them.
+   */
+  function readNoteText(textEl) {
+    return textEl.innerText;
+  }
+
   function screenToWorld(clientX, clientY) {
     const rect = viewportEl.getBoundingClientRect();
     const sx = clientX - rect.left;
@@ -533,7 +539,7 @@
         if (parsed.camera) {
           state.camera.x = parsed.camera.x || 0;
           state.camera.y = parsed.camera.y || 0;
-          state.camera.zoom = parsed.camera.zoom || 1;
+          state.camera.zoom = clamp(parsed.camera.zoom || 1, MIN_ZOOM, MAX_ZOOM);
         }
       }
     } catch (err) {
@@ -563,14 +569,14 @@
   }
 
   function zoomAt(clientX, clientY, factor) {
+    // keep the world point under the cursor pinned while the zoom changes
     const rect = viewportEl.getBoundingClientRect();
     const sx = clientX - rect.left;
     const sy = clientY - rect.top;
-    const worldX = (sx - state.camera.x) / state.camera.zoom;
-    const worldY = (sy - state.camera.y) / state.camera.zoom;
+    const world = screenToWorld(clientX, clientY);
     const newZoom = clamp(state.camera.zoom * factor, MIN_ZOOM, MAX_ZOOM);
-    state.camera.x = sx - worldX * newZoom;
-    state.camera.y = sy - worldY * newZoom;
+    state.camera.x = sx - world.x * newZoom;
+    state.camera.y = sy - world.y * newZoom;
     state.camera.zoom = newZoom;
     applyCamera();
     scheduleSave();
@@ -619,7 +625,7 @@
     });
     editBtn.addEventListener("click", function (e) {
       e.stopPropagation();
-      enterEditMode(note, text);
+      enterEditMode(text);
     });
     toolbar.appendChild(editBtn);
 
@@ -669,19 +675,11 @@
    * Notes: interaction (select / drag / edit / delete)
    * ========================================================== */
 
-  function selectNote(id) {
-    if (selectedNoteId === id) return;
+  /** Pass null to clear the selection. */
+  function setSelectedNote(id) {
     selectedNoteId = id;
     Array.prototype.forEach.call(notesLayerEl.children, function (el) {
       el.classList.toggle("selected", el.dataset.id === id);
-    });
-  }
-
-  function deselectNote() {
-    if (selectedNoteId === null) return;
-    selectedNoteId = null;
-    Array.prototype.forEach.call(notesLayerEl.children, function (el) {
-      el.classList.remove("selected");
     });
   }
 
@@ -699,7 +697,7 @@
     if (idx !== -1) state.notes.splice(idx, 1);
     const el = notesLayerEl.querySelector('[data-id="' + id + '"]');
     if (el) el.remove();
-    if (selectedNoteId === id) selectedNoteId = null;
+    if (selectedNoteId === id) setSelectedNote(null);
     updateEmptyHint();
     scheduleSave();
   }
@@ -713,18 +711,16 @@
     sel.addRange(range);
   }
 
-  function enterEditMode(note, textEl) {
+  function enterEditMode(textEl) {
     textEl.classList.add("editing");
     textEl.contentEditable = "true";
     textEl.focus();
     placeCaretAtEnd(textEl);
   }
 
-  function exitEditMode(note, textEl) {
+  function exitEditMode(textEl) {
     textEl.classList.remove("editing");
     textEl.contentEditable = "false";
-    note.text = textEl.textContent;
-    scheduleSave();
   }
 
   function wireNoteInteractions(el, note, textEl) {
@@ -739,7 +735,7 @@
       e.stopPropagation();
 
       bringToFront(note);
-      selectNote(note.id);
+      setSelectedNote(note.id);
 
       dragging = true;
       moved = false;
@@ -779,7 +775,7 @@
       } else {
         // Pointer went down and up again without crossing the drag threshold:
         // treat it as a click on the note and start editing its text.
-        enterEditMode(note, textEl);
+        enterEditMode(textEl);
       }
     });
 
@@ -788,32 +784,44 @@
       releaseDrag(e);
     });
 
+    // Keep the model in step with every keystroke: waiting for blur would lose
+    // whatever is being typed when the tab is closed or reloaded.
+    textEl.addEventListener("input", function () {
+      note.text = readNoteText(textEl);
+      scheduleSave();
+    });
+
+    // Paste as plain text so copied formatting (Word, Excel, web pages)
+    // does not end up as markup inside the note.
+    textEl.addEventListener("paste", function (e) {
+      if (!e.clipboardData) return;
+      e.preventDefault();
+      document.execCommand("insertText", false, e.clipboardData.getData("text/plain"));
+    });
+
     textEl.addEventListener("blur", function () {
-      if (textEl.classList.contains("editing")) exitEditMode(note, textEl);
+      if (textEl.classList.contains("editing")) exitEditMode(textEl);
     });
   }
 
   function createNoteAt(worldX, worldY) {
+    // drop the note centred on the click
     const note = {
       id: uid("note"),
-      x: worldX - 95,
-      y: worldY - 75,
+      x: worldX - NOTE_WIDTH / 2,
+      y: worldY - NOTE_HEIGHT / 2,
       color: lastUsedColor,
       text: "",
       rot: Math.round((Math.random() * 4 - 2) * 10) / 10,
     };
-    state.notes.push(note);
+    state.notes.push(note); // last in the array is topmost
     const el = createNoteElement(note);
-    bringToFront(note);
-    selectNote(note.id);
+    setSelectedNote(note.id);
     updateEmptyHint();
     scheduleSave();
 
     setTool("select");
-    setTimeout(function () {
-      const textEl = el.querySelector(".note-text");
-      enterEditMode(note, textEl);
-    }, 0);
+    enterEditMode(el.querySelector(".note-text"));
   }
 
   /* ============================================================
@@ -823,6 +831,25 @@
   let isDrawing = false;
   let activeStroke = null;
   let activePolyline = null;
+  // Points of the stroke being drawn, kept as a string so each new point is
+  // appended instead of re-serialising the whole stroke on every move event.
+  let activePointsText = "";
+
+  function pointToText(point) {
+    return point[0] + "," + point[1];
+  }
+
+  function createPolylineElement(stroke) {
+    const poly = document.createElementNS(SVG_NS, "polyline");
+    poly.setAttribute("stroke", stroke.color);
+    poly.setAttribute("stroke-width", stroke.width);
+    poly.setAttribute("fill", "none");
+    poly.setAttribute("stroke-linecap", "round");
+    poly.setAttribute("stroke-linejoin", "round");
+    poly.setAttribute("points", stroke.points.map(pointToText).join(" "));
+    poly.dataset.id = stroke.id;
+    return poly;
+  }
 
   function startStroke(worldPoint) {
     activeStroke = {
@@ -831,57 +858,75 @@
       width: PEN_WIDTH,
       points: [[worldPoint.x, worldPoint.y]],
     };
-    activePolyline = document.createElementNS(SVG_NS, "polyline");
-    activePolyline.setAttribute("stroke", activeStroke.color);
-    activePolyline.setAttribute("stroke-width", activeStroke.width);
-    activePolyline.setAttribute("fill", "none");
-    activePolyline.setAttribute("stroke-linecap", "round");
-    activePolyline.setAttribute("stroke-linejoin", "round");
-    activePolyline.dataset.id = activeStroke.id;
-    updatePolylinePoints(activePolyline, activeStroke.points);
+    activePointsText = pointToText(activeStroke.points[0]);
+    activePolyline = createPolylineElement(activeStroke);
     svgEl.appendChild(activePolyline);
   }
 
   function extendStroke(worldPoint) {
     if (!activeStroke) return;
-    activeStroke.points.push([worldPoint.x, worldPoint.y]);
-    updatePolylinePoints(activePolyline, activeStroke.points);
+    const last = activeStroke.points[activeStroke.points.length - 1];
+    // Ignore movements smaller than a couple of screen pixels: they add nothing
+    // visible but make long strokes heavy to draw and to save.
+    const dx = (worldPoint.x - last[0]) * state.camera.zoom;
+    const dy = (worldPoint.y - last[1]) * state.camera.zoom;
+    if (dx * dx + dy * dy < MIN_POINT_DISTANCE * MIN_POINT_DISTANCE) return;
+
+    const point = [worldPoint.x, worldPoint.y];
+    activeStroke.points.push(point);
+    activePointsText += " " + pointToText(point);
+    activePolyline.setAttribute("points", activePointsText);
   }
 
   function endStroke() {
     if (!activeStroke) return;
-    if (activeStroke.points.length > 1) {
-      state.strokes.push(activeStroke);
-      updateEmptyHint();
-      scheduleSave();
-    } else {
+    if (activeStroke.points.length === 1) {
       // single-point "tap" — drop a tiny dot so the click is not silently lost
-      activeStroke.points.push([activeStroke.points[0][0] + 0.1, activeStroke.points[0][1] + 0.1]);
-      state.strokes.push(activeStroke);
-      updateEmptyHint();
-      scheduleSave();
+      const first = activeStroke.points[0];
+      activeStroke.points.push([first[0] + 0.1, first[1] + 0.1]);
+      activePolyline.setAttribute("points", activeStroke.points.map(pointToText).join(" "));
     }
+    state.strokes.push(activeStroke);
     activeStroke = null;
     activePolyline = null;
-  }
-
-  function updatePolylinePoints(polyline, points) {
-    polyline.setAttribute("points", points.map(function (p) { return p[0] + "," + p[1]; }).join(" "));
+    activePointsText = "";
+    updateEmptyHint();
+    scheduleSave();
   }
 
   function renderAllStrokes() {
     svgEl.innerHTML = "";
     state.strokes.forEach(function (stroke) {
-      const poly = document.createElementNS(SVG_NS, "polyline");
-      poly.setAttribute("stroke", stroke.color);
-      poly.setAttribute("stroke-width", stroke.width);
-      poly.setAttribute("fill", "none");
-      poly.setAttribute("stroke-linecap", "round");
-      poly.setAttribute("stroke-linejoin", "round");
-      poly.dataset.id = stroke.id;
-      updatePolylinePoints(poly, stroke.points);
-      svgEl.appendChild(poly);
+      svgEl.appendChild(createPolylineElement(stroke));
     });
+  }
+
+  /** Squared distance from a point to the segment a–b. */
+  function distanceToSegmentSq(px, py, ax, ay, bx, by) {
+    const vx = bx - ax;
+    const vy = by - ay;
+    const lengthSq = vx * vx + vy * vy;
+    const t = lengthSq === 0 ? 0 : clamp(((px - ax) * vx + (py - ay) * vy) / lengthSq, 0, 1);
+    const dx = px - (ax + t * vx);
+    const dy = py - (ay + t * vy);
+    return dx * dx + dy * dy;
+  }
+
+  /**
+   * True when the eraser circle touches the stroke. The segments are tested,
+   * not just the recorded points: a quickly drawn line has its points far
+   * apart and would otherwise slip through the eraser.
+   */
+  function strokeIsWithin(stroke, worldPoint, radiusSq) {
+    const points = stroke.points;
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1];
+      const b = points[i];
+      if (distanceToSegmentSq(worldPoint.x, worldPoint.y, a[0], a[1], b[0], b[1]) <= radiusSq) {
+        return true;
+      }
+    }
+    return false;
   }
 
   function eraseNear(worldPoint) {
@@ -891,17 +936,11 @@
 
     for (let i = state.strokes.length - 1; i >= 0; i--) {
       const stroke = state.strokes[i];
-      const hit = stroke.points.some(function (p) {
-        const dx = p[0] - worldPoint.x;
-        const dy = p[1] - worldPoint.y;
-        return dx * dx + dy * dy <= radiusSq;
-      });
-      if (hit) {
-        state.strokes.splice(i, 1);
-        const el = svgEl.querySelector('[data-id="' + stroke.id + '"]');
-        if (el) el.remove();
-        changed = true;
-      }
+      if (!strokeIsWithin(stroke, worldPoint, radiusSq)) continue;
+      state.strokes.splice(i, 1);
+      const el = svgEl.querySelector('[data-id="' + stroke.id + '"]');
+      if (el) el.remove();
+      changed = true;
     }
 
     if (changed) {
@@ -916,18 +955,15 @@
 
   function setTool(tool) {
     currentTool = tool;
-    document.body.className = document.body.className
-      .split(" ")
-      .filter(function (c) { return c.indexOf("tool-") !== 0; })
-      .join(" ")
-      .trim();
-    document.body.classList.add("tool-" + tool);
+    TOOLS.forEach(function (name) {
+      document.body.classList.toggle("tool-" + name, name === tool);
+    });
 
     Array.prototype.forEach.call(toolbarEl.querySelectorAll(".tool-btn[data-tool]"), function (btn) {
       btn.classList.toggle("active", btn.dataset.tool === tool);
     });
 
-    if (tool !== "select") deselectNote();
+    if (tool !== "select") setSelectedNote(null);
 
     brushCursorEl.style.display = tool === "pen" || tool === "eraser" ? "block" : "none";
     updateBrushCursorSize();
@@ -952,7 +988,7 @@
   let panning = false;
   let panStart = { x: 0, y: 0 };
   let camStart = { x: 0, y: 0 };
-  let clickMoved = false;
+  let pointerMoved = false;
   let spacePressed = false;
 
   function isBackgroundTarget(target) {
@@ -960,8 +996,11 @@
   }
 
   viewportEl.addEventListener("pointerdown", function (e) {
+    pointerMoved = false;
+
     // Middle-button or space-drag: pan regardless of tool.
     if (e.button === 1 || (spacePressed && e.button === 0)) {
+      e.preventDefault(); // middle-click would otherwise start browser autoscroll
       startPan(e);
       return;
     }
@@ -992,7 +1031,6 @@
 
   function startPan(e) {
     panning = true;
-    clickMoved = false;
     panStart = { x: e.clientX, y: e.clientY };
     camStart = { x: state.camera.x, y: state.camera.y };
     viewportEl.classList.add("panning");
@@ -1009,7 +1047,7 @@
     if (panning) {
       const dx = e.clientX - panStart.x;
       const dy = e.clientY - panStart.y;
-      if (Math.abs(dx) + Math.abs(dy) > DRAG_THRESHOLD) clickMoved = true;
+      if (Math.abs(dx) + Math.abs(dy) > DRAG_THRESHOLD) pointerMoved = true;
       state.camera.x = camStart.x + dx;
       state.camera.y = camStart.y + dy;
       applyCamera();
@@ -1032,10 +1070,10 @@
       panning = false;
       viewportEl.classList.remove("panning");
       try { viewportEl.releasePointerCapture(e.pointerId); } catch (err) { /* noop */ }
-      if (!clickMoved && currentTool === "select" && isBackgroundTarget(e.target)) {
-        deselectNote();
+      if (!pointerMoved && currentTool === "select" && isBackgroundTarget(e.target)) {
+        setSelectedNote(null);
       }
-      if (clickMoved) scheduleSave();
+      if (pointerMoved) scheduleSave();
       return;
     }
     if (isDrawing) {
@@ -1051,8 +1089,20 @@
   viewportEl.addEventListener("click", function (e) {
     if (currentTool !== "note") return;
     if (!isBackgroundTarget(e.target)) return;
+    if (pointerMoved) return; // the pointer was dragged (space-pan), not clicked
     const worldPoint = screenToWorld(e.clientX, e.clientY);
     createNoteAt(worldPoint.x, worldPoint.y);
+  });
+
+  // Keep the brush preview from lingering when the pointer leaves the canvas.
+  viewportEl.addEventListener("pointerleave", function () {
+    brushCursorEl.style.display = "none";
+  });
+
+  viewportEl.addEventListener("pointerenter", function () {
+    if (currentTool === "pen" || currentTool === "eraser") {
+      brushCursorEl.style.display = "block";
+    }
   });
 
   viewportEl.addEventListener(
@@ -1097,6 +1147,10 @@
    * ========================================================== */
 
   document.addEventListener("keydown", function (e) {
+    // Leave browser and OS shortcuts alone (Ctrl+V, Ctrl+P, Cmd+N ...):
+    // they must not be mistaken for the single-letter tool shortcuts.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+
     const active = document.activeElement;
     const isEditingText = active && active.isContentEditable;
 
@@ -1113,11 +1167,12 @@
     }
 
     if (e.key === "Escape") {
-      deselectNote();
+      setSelectedNote(null);
       return;
     }
 
     if ((e.key === "Delete" || e.key === "Backspace") && selectedNoteId) {
+      e.preventDefault(); // Backspace would otherwise navigate back in some browsers
       deleteNote(selectedNoteId);
       return;
     }
