@@ -891,6 +891,7 @@
 
   function wireNoteInteractions(el, note, textEl) {
     let dragging = false;
+    let dragPointerId = null;
     let moved = false;
     let startScreen = { x: 0, y: 0 };
     let startWorld = { x: 0, y: 0 };
@@ -899,6 +900,12 @@
       // Only the primary button drags. A right-click used to start a drag that
       // no pointerup ever ended, leaving the note glued to the cursor.
       if (e.button !== 0) return;
+      // Ignore a second finger while this note already owns a drag. Without
+      // this guard it overwrote the starting coordinates of the first drag.
+      if (dragging) {
+        e.stopPropagation();
+        return;
+      }
       if (currentTool !== "select") return;
       if (spacePressed) return; // Space always pans, even over a note
       // Clicking inside the text being edited must place the caret, but the
@@ -910,6 +917,7 @@
       setSelectedNote(note.id);
 
       dragging = true;
+      dragPointerId = e.pointerId;
       moved = false;
       startScreen = { x: e.clientX, y: e.clientY };
       startWorld = { x: note.x, y: note.y };
@@ -917,7 +925,7 @@
     });
 
     el.addEventListener("pointermove", function (e) {
-      if (!dragging) return;
+      if (!dragging || e.pointerId !== dragPointerId) return;
       const dx = e.clientX - startScreen.x;
       const dy = e.clientY - startScreen.y;
       if (!moved && Math.abs(dx) + Math.abs(dy) > DRAG_THRESHOLD) {
@@ -933,15 +941,17 @@
     });
 
     function releaseDrag(e) {
+      const positionChanged = moved;
       dragging = false;
+      dragPointerId = null;
       el.classList.remove("dragging");
       releaseCapture(el, e.pointerId);
+      return positionChanged;
     }
 
     el.addEventListener("pointerup", function (e) {
-      if (!dragging) return;
-      const wasMoved = moved;
-      releaseDrag(e);
+      if (!dragging || e.pointerId !== dragPointerId) return;
+      const wasMoved = releaseDrag(e);
       if (wasMoved) {
         scheduleSave();
       } else {
@@ -952,8 +962,11 @@
     });
 
     el.addEventListener("pointercancel", function (e) {
-      if (!dragging) return;
-      releaseDrag(e);
+      if (!dragging || e.pointerId !== dragPointerId) return;
+      // A cancellation can happen after the note has visibly moved (for
+      // example when the OS takes over a touch gesture). Keep that position
+      // in autosave just as a normal pointerup would.
+      if (releaseDrag(e)) scheduleSave();
     });
 
     // Keep the model in step with every keystroke: waiting for blur would lose
@@ -1161,6 +1174,7 @@
    * ========================================================== */
 
   let panning = false;
+  let viewportPointerId = null;
   let panStart = { x: 0, y: 0 };
   let camStart = { x: 0, y: 0 };
   let pointerMoved = false;
@@ -1176,6 +1190,10 @@
     // left to the browser: acting on it started gestures that never finished,
     // because the context menu swallows the matching pointerup.
     if (e.button !== 0 && !isMiddleButton) return;
+    // Pan/draw state is intentionally single-pointer. Let the pointer that
+    // started the gesture finish it instead of allowing a second touch to
+    // reset or terminate the first gesture.
+    if (viewportPointerId !== null) return;
 
     pointerMoved = false;
 
@@ -1194,6 +1212,7 @@
     }
 
     isDrawing = true;
+    viewportPointerId = e.pointerId;
     viewportEl.setPointerCapture(e.pointerId);
     const worldPoint = screenToWorld(e.clientX, e.clientY);
     if (currentTool === "pen") {
@@ -1205,6 +1224,7 @@
 
   function startPan(e) {
     panning = true;
+    viewportPointerId = e.pointerId;
     panStart = { x: e.clientX, y: e.clientY };
     camStart = { x: state.camera.x, y: state.camera.y };
     document.body.classList.add("panning");
@@ -1218,7 +1238,7 @@
       brushCursorEl.style.top = e.clientY + "px";
     }
 
-    if (panning) {
+    if (panning && e.pointerId === viewportPointerId) {
       const dx = e.clientX - panStart.x;
       const dy = e.clientY - panStart.y;
       if (Math.abs(dx) + Math.abs(dy) > DRAG_THRESHOLD) pointerMoved = true;
@@ -1228,20 +1248,22 @@
       return;
     }
 
-    if (isDrawing && currentTool === "pen") {
+    if (isDrawing && e.pointerId === viewportPointerId && currentTool === "pen") {
       extendStroke(screenToWorld(e.clientX, e.clientY));
       return;
     }
 
-    if (isDrawing && currentTool === "eraser") {
+    if (isDrawing && e.pointerId === viewportPointerId && currentTool === "eraser") {
       eraseNear(screenToWorld(e.clientX, e.clientY));
       return;
     }
   });
 
   function finishPointer(e) {
+    if (e.pointerId !== viewportPointerId) return;
     if (panning) {
       panning = false;
+      viewportPointerId = null;
       document.body.classList.remove("panning");
       releaseCapture(viewportEl, e.pointerId);
       if (pointerMoved) {
@@ -1253,6 +1275,7 @@
     }
     if (isDrawing) {
       isDrawing = false;
+      viewportPointerId = null;
       releaseCapture(viewportEl, e.pointerId);
       // Unconditional: switching tools mid-stroke used to skip this and the
       // line drawn so far was thrown away. endStroke does nothing when idle.
