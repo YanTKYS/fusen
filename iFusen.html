@@ -108,6 +108,10 @@
 
   .sticky-note {
     position: absolute;
+    /* Same as the viewport: without this, a drag started on a note is taken
+       over by the browser's own touch gestures on tablets and the note snaps
+       back to where it started. */
+    touch-action: none;
     width: 190px;
     min-height: 150px;
     padding: 14px 14px 10px;
@@ -872,7 +876,41 @@
     sel.addRange(range);
   }
 
-  function enterEditMode(textEl) {
+  /** The caret position for a screen point, or null when the browser has none. */
+  function caretRangeAt(clientX, clientY) {
+    if (document.caretPositionFromPoint) {
+      const pos = document.caretPositionFromPoint(clientX, clientY);
+      if (!pos) return null;
+      const range = document.createRange();
+      range.setStart(pos.offsetNode, pos.offset);
+      range.collapse(true);
+      return range;
+    }
+    // Safari only has the older, non-standard spelling.
+    if (document.caretRangeFromPoint) return document.caretRangeFromPoint(clientX, clientY);
+    return null;
+  }
+
+  /**
+   * Puts the caret where the note was clicked. The text is not editable until
+   * this moment, so the browser cannot place the caret itself: without this,
+   * clicking into the middle of an existing note to fix a typo jumped to the
+   * end of the text instead. Falls back to the end when the click landed
+   * outside the text (the note's margin, or an empty note).
+   */
+  function placeCaretAtPoint(el, clientX, clientY) {
+    const range = caretRangeAt(clientX, clientY);
+    if (!range || !el.contains(range.startContainer)) {
+      placeCaretAtEnd(el);
+      return;
+    }
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  /** Pass the click coordinates to start typing there rather than at the end. */
+  function enterEditMode(textEl, clientX, clientY) {
     // Already editing: keep the caret where the user put it.
     if (textEl.classList.contains("editing")) {
       textEl.focus();
@@ -881,7 +919,8 @@
     textEl.classList.add("editing");
     textEl.contentEditable = "true";
     textEl.focus();
-    placeCaretAtEnd(textEl);
+    if (typeof clientX === "number") placeCaretAtPoint(textEl, clientX, clientY);
+    else placeCaretAtEnd(textEl);
   }
 
   function exitEditMode(textEl) {
@@ -926,6 +965,13 @@
 
     el.addEventListener("pointermove", function (e) {
       if (!dragging || e.pointerId !== dragPointerId) return;
+      // No button held any more: the release happened somewhere we never heard
+      // about (switching windows mid-drag is the usual way). Finish the drag
+      // here, or the note keeps following a pointer that is merely hovering.
+      if (e.buttons === 0) {
+        if (releaseDrag(e)) scheduleSave();
+        return;
+      }
       const dx = e.clientX - startScreen.x;
       const dy = e.clientY - startScreen.y;
       if (!moved && Math.abs(dx) + Math.abs(dy) > DRAG_THRESHOLD) {
@@ -957,7 +1003,7 @@
       } else {
         // Pointer went down and up again without crossing the drag threshold:
         // treat it as a click on the note and start editing its text.
-        enterEditMode(textEl);
+        enterEditMode(textEl, e.clientX, e.clientY);
       }
     });
 
@@ -1232,10 +1278,26 @@
   }
 
   viewportEl.addEventListener("pointermove", function (e) {
+    // The pointer can already be over the canvas when the page opens, and then
+    // no pointerenter is coming; without this the brush preview stayed hidden
+    // until the user moved the mouse out of the window and back in.
+    if (!pointerInViewport) {
+      pointerInViewport = true;
+      updateBrushCursor();
+    }
+
     // brush cursor follow
     if (currentTool === "pen" || currentTool === "eraser") {
       brushCursorEl.style.left = e.clientX + "px";
       brushCursorEl.style.top = e.clientY + "px";
+    }
+
+    // Same lost release as on a note drag: without a button, the gesture is
+    // over. Left running, the board panned along with an idle cursor and the
+    // eraser wiped out strokes the pointer merely passed over.
+    if ((panning || isDrawing) && e.pointerId === viewportPointerId && e.buttons === 0) {
+      finishPointer(e);
+      return;
     }
 
     if (panning && e.pointerId === viewportPointerId) {
