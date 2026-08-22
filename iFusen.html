@@ -855,6 +855,10 @@
     state.notes.push(note);
     const el = notesLayerEl.querySelector('[data-id="' + note.id + '"]');
     if (el) notesLayerEl.appendChild(el);
+    // The array order is the note stacking order. Persist a click that only
+    // brings a note forward too; otherwise it silently drops behind other
+    // notes again after the next reload.
+    scheduleSave();
   }
 
   function deleteNote(id) {
@@ -1012,6 +1016,14 @@
       // A cancellation can happen after the note has visibly moved (for
       // example when the OS takes over a touch gesture). Keep that position
       // in autosave just as a normal pointerup would.
+      if (releaseDrag(e)) scheduleSave();
+    });
+
+    // Browsers can drop pointer capture without a matching pointerup/cancel
+    // when the window loses focus. End the drag immediately so the next click
+    // is not swallowed by stale drag state.
+    el.addEventListener("lostpointercapture", function (e) {
+      if (!dragging || e.pointerId !== dragPointerId) return;
       if (releaseDrag(e)) scheduleSave();
     });
 
@@ -1347,6 +1359,7 @@
 
   viewportEl.addEventListener("pointerup", finishPointer);
   viewportEl.addEventListener("pointercancel", finishPointer);
+  viewportEl.addEventListener("lostpointercapture", finishPointer);
 
   viewportEl.addEventListener("click", function (e) {
     if (currentTool !== "note") return;
