@@ -151,8 +151,7 @@
     color: rgba(0, 0, 0, 0.32);
   }
 
-  /* Restrained cue that this note is the one currently being typed into;
-     the caret itself remains the primary indicator. */
+  /* Deliberately faint: the caret stays the primary "you are typing here" cue. */
   .note-text.editing {
     cursor: text;
     -webkit-user-select: text;
@@ -533,7 +532,6 @@
     return textEl.innerText;
   }
 
-  /** Releases a captured pointer, ignoring pointers that were never captured. */
   function releaseCapture(el, pointerId) {
     if (el.hasPointerCapture(pointerId)) el.releasePointerCapture(pointerId);
   }
@@ -566,8 +564,8 @@
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (err) {
       console.warn("iFusen: failed to save state", err);
-      // Autosave silently giving up is how a day of work disappears at the next
-      // reload. Say it once, then stay quiet so typing is not interrupted.
+      // Warn once only: a silently failing autosave loses the board at the next
+      // reload, but repeating the alert would interrupt every keystroke.
       if (!saveFailureReported) {
         saveFailureReported = true;
         window.alert(
@@ -578,7 +576,6 @@
     }
   }
 
-  /** Copies notes/strokes/camera from a plain object into the live state. */
   function applyStateData(data) {
     state.notes = Array.isArray(data.notes) ? data.notes : [];
     state.strokes = Array.isArray(data.strokes) ? data.strokes : [];
@@ -855,9 +852,8 @@
     state.notes.push(note);
     const el = notesLayerEl.querySelector('[data-id="' + note.id + '"]');
     if (el) notesLayerEl.appendChild(el);
-    // The array order is the note stacking order. Persist a click that only
-    // brings a note forward too; otherwise it silently drops behind other
-    // notes again after the next reload.
+    // The array order is the stacking order, so raising a note is a change
+    // worth saving even though nothing else about it moved.
     scheduleSave();
   }
 
@@ -896,11 +892,10 @@
   }
 
   /**
-   * Puts the caret where the note was clicked. The text is not editable until
-   * this moment, so the browser cannot place the caret itself: without this,
-   * clicking into the middle of an existing note to fix a typo jumped to the
-   * end of the text instead. Falls back to the end when the click landed
-   * outside the text (the note's margin, or an empty note).
+   * Puts the caret where the note was clicked. The text only becomes editable
+   * at this moment, so the browser cannot place the caret from the click
+   * itself. Falls back to the end when the click landed outside the text (the
+   * note's margin, or an empty note).
    */
   function placeCaretAtPoint(el, clientX, clientY) {
     const range = caretRangeAt(clientX, clientY);
@@ -940,11 +935,11 @@
     let startWorld = { x: 0, y: 0 };
 
     el.addEventListener("pointerdown", function (e) {
-      // Only the primary button drags. A right-click used to start a drag that
-      // no pointerup ever ended, leaving the note glued to the cursor.
+      // Only the primary button drags: the context menu swallows the pointerup
+      // of a right-click, so such a drag would never end.
       if (e.button !== 0) return;
-      // Ignore a second finger while this note already owns a drag. Without
-      // this guard it overwrote the starting coordinates of the first drag.
+      // A second finger must not take over, or it overwrites the starting
+      // coordinates of the drag already in progress.
       if (dragging) {
         e.stopPropagation();
         return;
@@ -1005,8 +1000,7 @@
       if (wasMoved) {
         scheduleSave();
       } else {
-        // Pointer went down and up again without crossing the drag threshold:
-        // treat it as a click on the note and start editing its text.
+        // Down and up without crossing the drag threshold: a click, not a drag.
         enterEditMode(textEl, e.clientX, e.clientY);
       }
     });
@@ -1020,8 +1014,7 @@
     });
 
     // Browsers can drop pointer capture without a matching pointerup/cancel
-    // when the window loses focus. End the drag immediately so the next click
-    // is not swallowed by stale drag state.
+    // when the window loses focus; end the drag here or it stays stuck.
     el.addEventListener("lostpointercapture", function (e) {
       if (!dragging || e.pointerId !== dragPointerId) return;
       if (releaseDrag(e)) scheduleSave();
@@ -1048,7 +1041,6 @@
   }
 
   function createNoteAt(worldX, worldY) {
-    // drop the note centred on the click
     const note = {
       id: uid("note"),
       x: worldX - NOTE_WIDTH / 2,
@@ -1144,7 +1136,6 @@
     });
   }
 
-  /** Squared distance from a point to the segment a–b. */
   function distanceToSegmentSq(px, py, ax, ay, bx, by) {
     const vx = bx - ax;
     const vy = by - ay;
@@ -1213,8 +1204,8 @@
 
   /**
    * Shows the pen/eraser circle at the size it will actually cover, and only
-   * while the pointer is over the canvas — otherwise switching tools with the
-   * keyboard left a stray circle in the corner of the screen.
+   * while the pointer is over the canvas: a keyboard tool switch would
+   * otherwise leave a stray circle wherever the pointer last was.
    */
   function updateBrushCursor() {
     const usesBrush = currentTool === "pen" || currentTool === "eraser";
@@ -1245,12 +1236,11 @@
   viewportEl.addEventListener("pointerdown", function (e) {
     const isMiddleButton = e.button === 1;
     // Anything but the primary or middle button (right-click, back/forward) is
-    // left to the browser: acting on it started gestures that never finished,
-    // because the context menu swallows the matching pointerup.
+    // left to the browser: the context menu swallows the matching pointerup,
+    // so a gesture started here would never finish.
     if (e.button !== 0 && !isMiddleButton) return;
-    // Pan/draw state is intentionally single-pointer. Let the pointer that
-    // started the gesture finish it instead of allowing a second touch to
-    // reset or terminate the first gesture.
+    // Pan/draw state is single-pointer: the pointer that started the gesture
+    // finishes it, and a second touch is ignored rather than resetting it.
     if (viewportPointerId !== null) return;
 
     pointerMoved = false;
@@ -1290,23 +1280,21 @@
   }
 
   viewportEl.addEventListener("pointermove", function (e) {
-    // The pointer can already be over the canvas when the page opens, and then
-    // no pointerenter is coming; without this the brush preview stayed hidden
-    // until the user moved the mouse out of the window and back in.
+    // The pointer can already be over the canvas when the page opens, and no
+    // pointerenter is coming in that case, so the preview is armed here too.
     if (!pointerInViewport) {
       pointerInViewport = true;
       updateBrushCursor();
     }
 
-    // brush cursor follow
     if (currentTool === "pen" || currentTool === "eraser") {
       brushCursorEl.style.left = e.clientX + "px";
       brushCursorEl.style.top = e.clientY + "px";
     }
 
-    // Same lost release as on a note drag: without a button, the gesture is
-    // over. Left running, the board panned along with an idle cursor and the
-    // eraser wiped out strokes the pointer merely passed over.
+    // Same lost release as on a note drag: with no button held the gesture is
+    // over. Left running, panning follows an idle cursor and the eraser wipes
+    // out every stroke it passes over.
     if ((panning || isDrawing) && e.pointerId === viewportPointerId && e.buttons === 0) {
       finishPointer(e);
       return;
@@ -1351,8 +1339,8 @@
       isDrawing = false;
       viewportPointerId = null;
       releaseCapture(viewportEl, e.pointerId);
-      // Unconditional: switching tools mid-stroke used to skip this and the
-      // line drawn so far was thrown away. endStroke does nothing when idle.
+      // Unconditional: a tool switch mid-stroke must still commit the line
+      // drawn so far. endStroke does nothing when idle.
       endStroke();
     }
   }
@@ -1369,7 +1357,6 @@
     createNoteAt(worldPoint.x, worldPoint.y);
   });
 
-  // Keep the brush preview from lingering when the pointer leaves the canvas.
   viewportEl.addEventListener("pointerleave", function () {
     pointerInViewport = false;
     updateBrushCursor();
@@ -1496,8 +1483,8 @@
     if (e.code === "Space") setSpacePan(false);
   });
 
-  // Switching windows while Space is held never delivers the keyup, which left
-  // the board stuck in pan mode: every later click dragged instead of drawing.
+  // Switching windows while Space is held never delivers the keyup, which
+  // would otherwise leave the board stuck in pan mode.
   window.addEventListener("blur", function () {
     setSpacePan(false);
   });
