@@ -44,3 +44,11 @@
 ## デプロイ
 
 `main` ブランチの `iFusen.html` は、`.github/workflows/pages.yml` により GitHub Pages へ自動デプロイされます（`iFusen.html` を `index.html` として公開）。
+
+## ライセンス
+
+[MIT License](LICENSE)（Copyright (c) 2026 YanTKYS）で提供します。
+
+- 対象: 本リポジトリの自作成果物（`iFusen.html` と本 README）。
+- `iFusen.html` 単体で配布しても条件が引き継がれるよう、MIT License の全文を冒頭の HTML コメントに含めています。
+- 本リポジトリには第三者のコード・ライブラリ・画像・フォント等は含まれていません（フォントは利用者の環境のシステムフォントを参照するのみです）。
